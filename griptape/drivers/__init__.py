@@ -16,6 +16,7 @@ from .prompt.ollama import OllamaPromptDriver
 from .prompt.grok import GrokPromptDriver
 from .prompt.griptape_cloud import GriptapeCloudPromptDriver
 from .prompt.perplexity import PerplexityPromptDriver
+from .prompt.openrouter import OpenRouterPromptDriver # my customed node
 
 from .memory.conversation import BaseConversationMemoryDriver
 from .memory.conversation.local import LocalConversationMemoryDriver
@@ -75,6 +76,7 @@ from .image_generation.amazon_bedrock import AmazonBedrockImageGenerationDriver
 from .image_generation.dummy import DummyImageGenerationDriver
 from .image_generation.huggingface_pipeline import HuggingFacePipelineImageGenerationDriver
 from .image_generation.griptape_cloud import GriptapeCloudImageGenerationDriver
+from .image_generation.openrouter import OpenRouterImageGenerationDriver # my customed node
 
 from .web_scraper import BaseWebScraperDriver
 from .web_scraper.trafilatura import TrafilaturaWebScraperDriver
@@ -262,6 +264,8 @@ __all__ = [
     "TrafilaturaWebScraperDriver",
     "VoyageAiEmbeddingDriver",
     "WebhookEventListenerDriver",
+    "OpenRouterPromptDriver",
+    "OpenRouterImageGenerationDriver",
 ]
 
 

@@ -10,6 +10,8 @@ from attrs import define, field
 from griptape.drivers.image_generation import BaseImageGenerationDriver
 from griptape.artifacts import ImageArtifact
 
+import re
+
 
 @dataclass
 class ImageGenerationCost:
@@ -91,7 +93,7 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
         resp = requests.post(url, json=payload, headers=self._build_headers(), timeout=self.timeout)
         resp.raise_for_status()
         body = resp.json()
-        
+
         # response like this:
         # {
         #   "usage": {"prompt_tokens": 9, "completion_tokens": 1290},
@@ -143,12 +145,14 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
             raise Exception(f"No base64 image found in response: {body}")
 
         image_bytes = base64.b64decode(b64)
+        sizez = self.image_size
+        width, height = [int(dim) for dim in sizez.split('x')]
 
         image_artifact = ImageArtifact(
             value=image_bytes,
             format="png",
-            width=1024,
-            height=1024,
+            width=width,
+            height=height,
             meta={
                 "prompt": prompt,
                 "model": self.model,

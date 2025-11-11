@@ -10,7 +10,6 @@ from attrs import define, field
 from griptape.drivers.image_generation import BaseImageGenerationDriver
 from griptape.artifacts import ImageArtifact
 
-import re
 
 
 @dataclass

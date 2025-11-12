@@ -26,6 +26,7 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
     """Compact OpenRouter image generation driver with model-aware cost calculation."""
 
     # Model prices expressed per 1K units (tokens or images)
+    # These values need to be manually updated if OpenRouter changes its pricing, as there is no direct API to fetch them dynamically.
     MODEL_PRICES = {
         "google/gemini-2.5-flash-image": {
             "input_tokens": 0.0003,    # $0.30 / 1M input tokens -> $0.0003 / 1K
@@ -40,16 +41,16 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
             "output_images": 0.03,
         },
         "openai/gpt-5-image": {
-            "input_tokens": 0.005,     # $5.00 / 1M -> $0.005 / 1K
-            "output_tokens": 0.015,    # $15.00 / 1M -> $0.015 / 1K
-            "input_images": 2.0,       # $2.00 / 1K input images
-            "output_images": 2.0,      # $2.00 / 1K output images
+            "input_tokens": 0.01,      # $10.00 / 1M -> $0.01 / 1K
+            "output_tokens": 0.01,     # $10.00 / 1M -> $0.01 / 1K
+            "input_images": 0.01,      # $0.01 / 1K input images
+            "output_images": 0.04,     # $0.04 / 1K output images
         },
         "openai/gpt-5-image-mini": {
-            "input_tokens": 0.0025,
-            "output_tokens": 0.0075,
-            "input_images": 1.0,
-            "output_images": 1.0,
+            "input_tokens": 0.0025,    # $2.50 / 1M -> $0.0025 / 1K
+            "output_tokens": 0.002,    # $2.00 / 1M -> $0.002 / 1K
+            "input_images": 0.0025,    # $0.0025 / 1K input images
+            "output_images": 0.008,    # $0.008 / 1K output images
         },
     }
 
@@ -57,7 +58,10 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
     endpoint: str = field(default="/chat/completions", kw_only=True)
     api_key: Optional[str] = field(default=None, kw_only=True)
     model: str = field(default="google/gemini-2.5-flash-image", kw_only=True)
-    image_size: str = field(default="1024x1024", kw_only=True)
+    image_size: str = field(default="832x1248", kw_only=True)
+    aspect_ratio: Optional[str] = field(default=None, kw_only=True)
+    quality: str = field(default="standard", kw_only=True)
+    style: str = field(default="natural", kw_only=True)
     timeout: int = field(default=120, kw_only=True)
     last_generation_cost: Optional[ImageGenerationCost] = field(default=None, init=False)
 
@@ -69,13 +73,33 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
 
     def try_text_to_image(self, prompts: list[str], negative_prompts: Optional[list[str]] = None) -> ImageArtifact:
         prompt = ", ".join(prompts)
+        
+        messages = [{"role": "user", "content": prompt}]
         payload = {
             "model": self.model,
-            "prompt": prompt,
-            "n": 1,
-            "size": self.image_size, # its not changing needs searching about the output of gemini
-            "response_format": "b64_json"
-            }
+            "messages": messages,
+            "modalities": ["image", "text"],
+        }
+
+        if self.model.startswith("google/"):
+            aspect_ratio = self.aspect_ratio
+            if not aspect_ratio:
+                # A simple mapping from size to aspect ratio, can be expanded.
+                size_to_aspect_ratio = {
+                    "1024x1024": "1:1", "832x1248": "2:3", "1248x832": "3:2",
+                    "864x1184": "3:4", "1184x864": "4:3", "896x1152": "4:5",
+                    "1152x896": "5:4", "768x1344": "9:16", "1344x768": "16:9",
+                    "1536x672": "21:9"
+                }
+                aspect_ratio = size_to_aspect_ratio.get(self.image_size, "1:1")
+            payload["image_config"] = {"aspect_ratio": aspect_ratio}
+        elif self.model.startswith("openai/"):
+            payload["n"] = 1
+            payload["size"] = self.image_size
+            payload["quality"] = self.quality
+            payload["style"] = self.style
+            payload["response_format"] = "b64_json"
+
 
         resp = requests.post(f"{self.base_url.rstrip('/')}{self.endpoint}", json=payload, headers=self._build_headers(), timeout=self.timeout)
         resp.raise_for_status()
@@ -109,14 +133,16 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
         )
 
         b64 = None
-        if "data" in body and len(body["data"]) > 0 and "b64_json" in body["data"][0]:
-            b64 = body["data"][0]["b64_json"]
-        elif "choices" in body and len(body["choices"]) > 0:
-            choice = body["choices"][0]
-            if "images" in choice and len(choice["images"]) > 0:
-                img_url = choice["images"][0].get("image_url", {}).get("url")
+        if "choices" in body and len(body["choices"]) > 0:
+            message = body["choices"][0].get("message", {})
+            if message and "images" in message and len(message["images"]) > 0:
+                img_url = message["images"][0].get("image_url", {}).get("url")
                 if img_url and img_url.startswith("data:image"):
                     b64 = img_url.split(",")[1]
+        
+        # Fallback for older/different response formats
+        if not b64 and "data" in body and len(body["data"]) > 0 and "b64_json" in body["data"][0]:
+            b64 = body["data"][0]["b64_json"]
 
         if not b64:
             raise Exception(f"No base64 image found in response: {body}")

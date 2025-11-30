@@ -27,7 +27,14 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
 
     # Model prices expressed per 1K units (tokens or images)
     # These values need to be manually updated if OpenRouter changes its pricing, as there is no direct API to fetch them dynamically.
+
     MODEL_PRICES = {
+        "google/gemini-3-pro-image-preview": {
+            "input_tokens": 0.002,
+            "output_tokens": 0.012,
+            "input_images": 2,
+            "output_images": 0.12,
+        },
         "google/gemini-2.5-flash-image": {
             "input_tokens": 0.0003,    # $0.30 / 1M input tokens -> $0.0003 / 1K
             "output_tokens": 0.0025,   # $2.50 / 1M output tokens -> $0.0025 / 1K
@@ -57,8 +64,8 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
     base_url: str = field(default="https://openrouter.ai/api/v1", kw_only=True, metadata={"serializable":True})
     endpoint: str = field(default="/chat/completions", kw_only=True)
     api_key: Optional[str] = field(default=None, kw_only=True)
-    model: str = field(default="google/gemini-2.5-flash-image", kw_only=True)
-    image_size: str = field(default="832x1248", kw_only=True)
+    model: str = field(default="google/gemini-3-pro-image-preview", kw_only=True)
+    image_size: str = field(default="1024x1024", kw_only=True)
     aspect_ratio: Optional[str] = field(default=None, kw_only=True)
     quality: str = field(default="standard", kw_only=True)
     style: str = field(default="natural", kw_only=True)

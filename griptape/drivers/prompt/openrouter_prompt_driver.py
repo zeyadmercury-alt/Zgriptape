@@ -25,6 +25,7 @@ class OpenRouterPromptDriver(BasePromptDriver):
     
     api_key: str = field(metadata={"serializable": True})
     base_url: str = field(default="https://openrouter.ai/api/v1", metadata={"serializable": True})
+    model: str = field(default="google/gemini-2.5-flash")
     tokenizer: BaseTokenizer = field(
         default=Factory(lambda self: OpenAiTokenizer(model=self.model), takes_self=True),
         metadata={"serializable": False},

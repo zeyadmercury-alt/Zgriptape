@@ -57,6 +57,14 @@ class OpenRouterPromptDriver(BasePromptDriver):
         response.raise_for_status()
         
         result = response.json()
+        # print(result)
+        used_model = result["model"]
+        usage = result["usage"]
+        prompt_tokens = usage["prompt_tokens"]
+        completion_tokens = usage["completion_tokens"]
+        print("model used: ", used_model)
+        print("prompt tokens: ", prompt_tokens)
+        print("completion tokens: ", completion_tokens)
         completion = result["choices"][0]["message"]["content"]
         
         return Message(

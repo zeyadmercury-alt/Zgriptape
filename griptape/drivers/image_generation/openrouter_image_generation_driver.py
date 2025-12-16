@@ -182,5 +182,90 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
     def try_image_outpainting(self, *args, **kwargs):
         raise NotImplementedError("Outpainting not yet supported for OpenRouter driver.")
 
-    def try_image_variation(self, *args, **kwargs):
-        raise NotImplementedError("Variation not yet supported for OpenRouter driver.")
+    def try_image_variation(
+        self,
+        prompts: list[str],
+        image: ImageArtifact,
+        negative_prompts: Optional[list[str]] = None,
+    ) -> ImageArtifact:
+        prompt = ", ".join(prompts)
+
+        # Encode input image to base64
+        image_b64 = base64.b64encode(image.value).decode("utf-8")
+
+        # OpenRouter multimodal message
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_b64}"
+                        },
+                    },
+                ],
+            }
+        ]
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "modalities": ["image", "text"],
+        }
+
+        if self.model.startswith("google/"):
+            payload["image_config"] = {
+                "aspect_ratio": self.aspect_ratio or "1:1"
+            }
+        elif self.model.startswith("openai/"):
+            payload["n"] = 1
+            payload["size"] = self.image_size
+            payload["quality"] = self.quality
+            payload["style"] = self.style
+            payload["response_format"] = "b64_json"
+
+        resp = requests.post(
+            f"{self.base_url.rstrip('/')}{self.endpoint}",
+            json=payload,
+            headers=self._build_headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+
+        b64 = None
+
+        if "choices" in body and body["choices"]:
+            message = body["choices"][0].get("message", {})
+            if "images" in message and message["images"]:
+                img_url = message["images"][0].get("image_url", {}).get("url")
+                if img_url and img_url.startswith("data:image"):
+                    b64 = img_url.split(",")[1]
+
+        if not b64 and "data" in body and body["data"]:
+            b64 = body["data"][0].get("b64_json")
+
+        if not b64:
+            raise Exception(f"No base64 image found in variation response: {body}")
+
+        image_bytes = base64.b64decode(b64)
+
+        try:
+            width, height = [int(dim) for dim in self.image_size.split("x")]
+        except Exception:
+            width = height = image.width or 1024
+
+        return ImageArtifact(
+            value=image_bytes,
+            format="png",
+            width=width,
+            height=height,
+            meta={
+                "prompt": prompt,
+                "model": self.model,
+                "variation_from": "openrouter",
+            },
+        )
+

@@ -1,340 +1,239 @@
 from __future__ import annotations
 
+import asyncio
 import base64
-from dataclasses import dataclass
-from typing import Optional
+import logging
+from typing import Optional, List
 
-import requests
+import httpx
 from attrs import define, field
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from griptape.drivers.image_generation import BaseImageGenerationDriver
 from griptape.artifacts import ImageArtifact
 
-
-@dataclass
-class ImageGenerationCost:
-    prompt_tokens: int
-    completion_tokens: int
-    input_images: int
-    output_images: int
-    total_cost_usd: float
-    model_used: str
+logger = logging.getLogger(__name__)
 
 
 @define
 class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
-    """Compact OpenRouter image generation driver with model-aware cost calculation."""
-
-    # Model prices expressed per 1K units (tokens or images)
-    # These values need to be manually updated if OpenRouter changes its pricing, as there is no direct API to fetch them dynamically.
-
-    MODEL_PRICES = {
-        "google/gemini-3-pro-image-preview": {
-            "input_tokens": 0.002,
-            "output_tokens": 0.012,
-            "input_images": 2,
-            "output_images": 0.12,
-        },
-        "google/gemini-2.5-flash-image": {
-            "input_tokens": 0.0003,    # $0.30 / 1M input tokens -> $0.0003 / 1K
-            "output_tokens": 0.0025,   # $2.50 / 1M output tokens -> $0.0025 / 1K
-            "input_images": 1.238,     # $1.238 / 1K input images
-            "output_images": 0.03,     # $0.03 / 1K output images
-        },
-        "google/gemini-2.5-flash-image-preview": {
-            "input_tokens": 0.0003,
-            "output_tokens": 0.0025,
-            "input_images": 1.238,
-            "output_images": 0.03,
-        },
-        "openai/gpt-5-image": {
-            "input_tokens": 0.01,      # $10.00 / 1M -> $0.01 / 1K
-            "output_tokens": 0.01,     # $10.00 / 1M -> $0.01 / 1K
-            "input_images": 0.01,      # $0.01 / 1K input images
-            "output_images": 0.04,     # $0.04 / 1K output images
-        },
-        "openai/gpt-5-image-mini": {
-            "input_tokens": 0.0025,    # $2.50 / 1M -> $0.0025 / 1K
-            "output_tokens": 0.002,    # $2.00 / 1M -> $0.002 / 1K
-            "input_images": 0.0025,    # $0.0025 / 1K input images
-            "output_images": 0.008,    # $0.008 / 1K output images
-        },
-    }
-
-    base_url: str = field(default="https://openrouter.ai/api/v1", kw_only=True, metadata={"serializable":True})
+    base_url: str = field(default="https://openrouter.ai/api/v1", kw_only=True)
     endpoint: str = field(default="/chat/completions", kw_only=True)
     api_key: Optional[str] = field(default=None, kw_only=True)
-    model: str = field(default="google/gemini-3-pro-image-preview", kw_only=True)
+    model: str = field(default="google/gemini-2.5-flash-image", kw_only=True)
     image_size: str = field(default="1024x1024", kw_only=True)
-    aspect_ratio: Optional[str] = field(default=None, kw_only=True)
-    quality: str = field(default="standard", kw_only=True)
-    style: str = field(default="natural", kw_only=True)
     timeout: int = field(default=120, kw_only=True)
-    last_generation_cost: Optional[ImageGenerationCost] = field(default=None, init=False)
 
-    def _build_headers(self) -> dict:
-        return {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-            }
+    # ------------------------------------------------------------------
+    # Required sync
+    # ------------------------------------------------------------------
 
-    def try_text_to_image(self, prompts: list[str], negative_prompts: Optional[list[str]] = None) -> ImageArtifact:
-        prompt = ", ".join(prompts)
-        
-        messages = [{"role": "user", "content": prompt}]
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "modalities": ["image", "text"],
-        }
-
-        if self.model.startswith("google/"):
-            aspect_ratio = self.aspect_ratio
-            if not aspect_ratio:
-                # A simple mapping from size to aspect ratio, can be expanded.
-                size_to_aspect_ratio = {
-                    "1024x1024": "1:1", "832x1248": "2:3", "1248x832": "3:2",
-                    "864x1184": "3:4", "1184x864": "4:3", "896x1152": "4:5",
-                    "1152x896": "5:4", "768x1344": "9:16", "1344x768": "16:9",
-                    "1536x672": "21:9"
-                }
-                aspect_ratio = size_to_aspect_ratio.get(self.image_size, "1:1")
-            payload["image_config"] = {"aspect_ratio": aspect_ratio}
-        elif self.model.startswith("openai/"):
-            payload["n"] = 1
-            payload["size"] = self.image_size
-            payload["quality"] = self.quality
-            payload["style"] = self.style
-            payload["response_format"] = "b64_json"
-
-
-        resp = requests.post(f"{self.base_url.rstrip('/')}{self.endpoint}", json=payload, headers=self._build_headers(), timeout=self.timeout)
-        resp.raise_for_status()
-        body = resp.json()
-
-        usage = body.get("usage", {})
-        prompt_tokens = usage.get("prompt_tokens", 0)
-        completion_tokens = usage.get("completion_tokens", 0)
-        input_images = usage.get("input_images", 0)
-        output_images = usage.get("output_images", 1)
-
-        prices = self.MODEL_PRICES.get(
-            self.model,
-            {"input_tokens": 0.0003, "output_tokens": 0.0025, "input_images": 1.0, "output_images": 1.0},
-        )
-
-        total_cost = (
-            (prompt_tokens / 1000.0) * prices["input_tokens"]
-            + (completion_tokens / 1000.0) * prices["output_tokens"]
-            + (input_images / 1000.0) * prices["input_images"]
-            + (output_images / 1000.0) * prices["output_images"]
-        )
-
-        cost_info = ImageGenerationCost(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            input_images=input_images,
-            output_images=output_images,
-            total_cost_usd=total_cost,
-            model_used=self.model,
-        )
-
-        b64 = None
-        if "choices" in body and len(body["choices"]) > 0:
-            message = body["choices"][0].get("message", {})
-            if message and "images" in message and len(message["images"]) > 0:
-                img_url = message["images"][0].get("image_url", {}).get("url")
-                if img_url and img_url.startswith("data:image"):
-                    b64 = img_url.split(",")[1]
-        
-        # Fallback for older/different response formats
-        if not b64 and "data" in body and len(body["data"]) > 0 and "b64_json" in body["data"][0]:
-            b64 = body["data"][0]["b64_json"]
-
-        if not b64:
-            raise Exception(f"No base64 image found in response: {body}")
-
-        image_bytes = base64.b64decode(b64)
+    def _run_async_in_sync_context(self, coro):
+        """Helper to run async coroutines in sync context."""
         try:
-            width, height = [int(dim) for dim in self.image_size.split("x")]
-        except Exception:
-            width = height = 1024
+            asyncio.get_running_loop()
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result()
+        except RuntimeError:
+            return asyncio.run(coro)
 
-        image_artifact = ImageArtifact(value=image_bytes, format="png", width=width, height=height, meta={
-            "prompt": prompt,
-            "model": self.model,
-            "usage": {
-                "prompt_tokens": cost_info.prompt_tokens,
-                "completion_tokens": cost_info.completion_tokens,
-                "input_images": cost_info.input_images,
-                "output_images": cost_info.output_images,
-                "total_cost_usd": cost_info.total_cost_usd,
-                "model_used": cost_info.model_used,
-            },
-        })
-
-        self.last_generation_cost = cost_info
-        return image_artifact
-
-    def try_image_inpainting(self, *args, **kwargs):
-        raise NotImplementedError("Inpainting not yet supported for OpenRouter driver.")
-
-    def try_image_outpainting(self, *args, **kwargs):
-        raise NotImplementedError("Outpainting not yet supported for OpenRouter driver.")
+    def try_text_to_image(self, prompts: List[str], negative_prompts=None) -> ImageArtifact:
+        return self._run_async_in_sync_context(self.try_text_to_image_async(prompts, negative_prompts))
 
     def try_image_variation(
         self,
-        prompts: list[str],
+        prompts: List[str],
         image: ImageArtifact,
-        negative_prompts: Optional[list[str]] = None,
+        negative_prompts=None,
+    ) -> ImageArtifact:
+        return self._run_async_in_sync_context(self.try_image_variation_async(prompts, image, negative_prompts))
+
+    def run_multi_image_generation(
+        self,
+        prompts: List[str],
+        images: List[ImageArtifact],
+    ) -> ImageArtifact:
+        return self._run_async_in_sync_context(self.run_multi_image_generation_async(prompts, images))
+
+    # ------------------------------------------------------------------
+    # Async implementations (real logic)
+    # ------------------------------------------------------------------
+
+
+    def _get_dimensions(self) -> tuple[int, int]:
+        try:
+            w, h = self.image_size.lower().split("x")
+            return int(w), int(h)
+        except Exception:
+            return 1024, 1024
+
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True,
+    )
+    async def try_text_to_image_async(self, prompts, negative_prompts=None) -> ImageArtifact:
+        prompt = ", ".join(prompts)
+
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "modalities": ["image", "text"],
+        }
+
+        body = await self._post(payload)
+        image_bytes = self._extract_image_bytes(body)
+
+        width, height = self._get_dimensions()
+
+        return ImageArtifact(
+            value=image_bytes,
+            format="png",
+            width=width,
+            height=height,
+            meta={"prompt": prompt, "model": self.model},
+        )
+
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True,
+    )
+    async def try_image_variation_async(self, prompts, image, negative_prompts=None) -> ImageArtifact:
+        prompt = ", ".join(prompts)
+        image_b64 = base64.b64encode(image.value).decode()
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{image_b64}"
+                            },
+                        },
+                    ],
+                }
+            ],
+            "modalities": ["image", "text"],
+        }
+
+        body = await self._post(payload)
+        image_bytes = self._extract_image_bytes(body)
+
+        width, height = self._get_dimensions()
+
+        return ImageArtifact(
+            value=image_bytes,
+            format="png",
+            width=width,
+            height=height,
+            meta={"prompt": prompt, "model": self.model},
+        )
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(min=2, max=10),
+        retry=retry_if_exception_type(Exception),
+        reraise=True,
+    )
+    async def run_multi_image_generation_async(
+        self,
+        prompts: List[str],
+        images: List[ImageArtifact],
     ) -> ImageArtifact:
         prompt = ", ".join(prompts)
 
-        # Encode input image to base64
-        image_b64 = base64.b64encode(image.value).decode("utf-8")
-
-        # OpenRouter multimodal message
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{image_b64}"
-                        },
-                    },
-                ],
-            }
-        ]
-
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "modalities": ["image", "text"],
-        }
-
-        if self.model.startswith("google/"):
-            payload["image_config"] = {
-                "aspect_ratio": self.aspect_ratio or "1:1"
-            }
-        elif self.model.startswith("openai/"):
-            payload["n"] = 1
-            payload["size"] = self.image_size
-            payload["quality"] = self.quality
-            payload["style"] = self.style
-            payload["response_format"] = "b64_json"
-
-        resp = requests.post(
-            f"{self.base_url.rstrip('/')}{self.endpoint}",
-            json=payload,
-            headers=self._build_headers(),
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        body = resp.json()
-
-        b64 = None
-
-        if "choices" in body and body["choices"]:
-            message = body["choices"][0].get("message", {})
-            if "images" in message and message["images"]:
-                img_url = message["images"][0].get("image_url", {}).get("url")
-                if img_url and img_url.startswith("data:image"):
-                    b64 = img_url.split(",")[1]
-
-        if not b64 and "data" in body and body["data"]:
-            b64 = body["data"][0].get("b64_json")
-
-        if not b64:
-            raise Exception(f"No base64 image found in variation response: {body}")
-
-        image_bytes = base64.b64decode(b64)
-
-        try:
-            width, height = [int(dim) for dim in self.image_size.split("x")]
-        except Exception:
-            width = height = image.width or 1024
-
-        return ImageArtifact(
-            value=image_bytes,
-            format="png",
-            width=width,
-            height=height,
-            meta={
-                "prompt": prompt,
-                "model": self.model,
-                "variation_from": "openrouter",
-            },
-        )
-    
-
-    def run_multi_image_generation(self, prompts: list[str], images: list[ImageArtifact]) -> ImageArtifact:
-        """
-        Generates an image from a prompt and multiple reference images using OpenRouter.
-        """
-        prompt = ", ".join(prompts)
-
         image_parts = [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64.b64encode(img.value).decode()}"}} 
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{base64.b64encode(img.value).decode()}"
+                },
+            }
             for img in images
         ]
 
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    *image_parts
-                ]
-            }
-        ]
-
         payload = {
             "model": self.model,
-            "messages": messages,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}, *image_parts],
+                }
+            ],
             "modalities": ["image", "text"],
         }
 
-        resp = requests.post(
-            f"{self.base_url.rstrip('/')}{self.endpoint}",
-            json=payload,
-            headers=self._build_headers(),
-            timeout=self.timeout
-        )
-        resp.raise_for_status()
-        body = resp.json()
-
-        # Extract base64 image
-        b64 = None
-        if "choices" in body and body["choices"]:
-            message = body["choices"][0].get("message", {})
-            if "images" in message and message["images"]:
-                img_url = message["images"][0].get("image_url", {}).get("url")
-                if img_url and img_url.startswith("data:image"):
-                    b64 = img_url.split(",")[1]
-        if not b64 and "data" in body and body["data"]:
-            b64 = body["data"][0].get("b64_json")
-        if not b64:
-            raise Exception(f"No base64 image found in multi-image generation response: {body}")
-
-        image_bytes = base64.b64decode(b64)
-        try:
-            width, height = [int(dim) for dim in self.image_size.split("x")]
-        except Exception:
-            width = height = 1024
+        body = await self._post(payload)
+        image_bytes = self._extract_image_bytes(body)
+        width, height = self._get_dimensions()
 
         return ImageArtifact(
             value=image_bytes,
             format="png",
             width=width,
             height=height,
-            meta={
-                "prompt": prompt,
-                "model": self.model,
-                "reference_images": len(images)
-            }
+            meta={"prompt": prompt, "model": self.model},
         )
 
+    def try_image_inpainting(
+        self,
+        prompts: List[str],
+        image: ImageArtifact,
+        mask: ImageArtifact,
+        negative_prompts=None,
+    ) -> ImageArtifact:
+        raise NotImplementedError("Image inpainting is not supported by OpenRouter driver")
 
+    def try_image_outpainting(
+        self,
+        prompts: List[str],
+        image: ImageArtifact,
+        mask: ImageArtifact,
+        negative_prompts=None,
+    ) -> ImageArtifact:
+        raise NotImplementedError("Image outpainting is not supported by OpenRouter driver")
+
+    async def _post(self, payload: dict) -> dict:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(
+                f"{self.base_url.rstrip('/')}{self.endpoint}",
+                headers=self._headers(),
+                json=payload,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    def _headers(self) -> dict:
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+    def _extract_image_bytes(self, body: dict) -> bytes:
+        b64 = None
+
+        if "choices" in body:
+            msg = body["choices"][0].get("message", {})
+            if "images" in msg:
+                url = msg["images"][0]["image_url"]["url"]
+                b64 = url.split(",")[1]
+
+        if not b64 and "data" in body:
+            b64 = body["data"][0].get("b64_json")
+
+        if not b64:
+            raise RuntimeError(f"No image found in response: {body}")
+
+        return base64.b64decode(b64)

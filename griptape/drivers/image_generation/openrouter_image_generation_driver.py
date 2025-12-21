@@ -268,4 +268,73 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
                 "variation_from": "openrouter",
             },
         )
+    
+
+    def run_multi_image_generation(self, prompts: list[str], images: list[ImageArtifact]) -> ImageArtifact:
+        """
+        Generates an image from a prompt and multiple reference images using OpenRouter.
+        """
+        prompt = ", ".join(prompts)
+
+        image_parts = [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64.b64encode(img.value).decode()}"}} 
+            for img in images
+        ]
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    *image_parts
+                ]
+            }
+        ]
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "modalities": ["image", "text"],
+        }
+
+        resp = requests.post(
+            f"{self.base_url.rstrip('/')}{self.endpoint}",
+            json=payload,
+            headers=self._build_headers(),
+            timeout=self.timeout
+        )
+        resp.raise_for_status()
+        body = resp.json()
+
+        # Extract base64 image
+        b64 = None
+        if "choices" in body and body["choices"]:
+            message = body["choices"][0].get("message", {})
+            if "images" in message and message["images"]:
+                img_url = message["images"][0].get("image_url", {}).get("url")
+                if img_url and img_url.startswith("data:image"):
+                    b64 = img_url.split(",")[1]
+        if not b64 and "data" in body and body["data"]:
+            b64 = body["data"][0].get("b64_json")
+        if not b64:
+            raise Exception(f"No base64 image found in multi-image generation response: {body}")
+
+        image_bytes = base64.b64decode(b64)
+        try:
+            width, height = [int(dim) for dim in self.image_size.split("x")]
+        except Exception:
+            width = height = 1024
+
+        return ImageArtifact(
+            value=image_bytes,
+            format="png",
+            width=width,
+            height=height,
+            meta={
+                "prompt": prompt,
+                "model": self.model,
+                "reference_images": len(images)
+            }
+        )
+
 

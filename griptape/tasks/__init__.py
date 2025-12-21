@@ -21,6 +21,7 @@ from .structure_run_task import StructureRunTask
 from .audio_transcription_task import AudioTranscriptionTask
 from .assistant_task import AssistantTask
 from .branch_task import BranchTask
+from .multi_image_generation_task import MultiImageGenerationTask
 
 __all__ = [
     "ActionsSubtask",
@@ -46,4 +47,5 @@ __all__ = [
     "ToolTask",
     "ToolkitTask",
     "VariationImageGenerationTask",
+    "MultiImageGenerationTask",
 ]

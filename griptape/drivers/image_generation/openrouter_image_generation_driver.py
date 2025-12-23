@@ -20,7 +20,7 @@ class OpenRouterImageGenerationDriver(BaseImageGenerationDriver):
     base_url: str = field(default="https://openrouter.ai/api/v1", kw_only=True)
     endpoint: str = field(default="/chat/completions", kw_only=True)
     api_key: Optional[str] = field(default=None, kw_only=True)
-    model: str = field(default="google/gemini-3-pro-image-preview", kw_only=True)
+    model: str = field(default="google/gemini-2.5-flash-image", kw_only=True)
     image_size: str = field(default="1024x1024", kw_only=True)
     timeout: int = field(default=120, kw_only=True)
 
